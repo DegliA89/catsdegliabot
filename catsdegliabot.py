@@ -10,7 +10,7 @@ import re
 import time
 import asyncio
 
-TOKEN = 8424956273:AAE_MuItcrsRYzVdtgc2BzEacNOdExYpAKA
+TOKEN = 
 RESTORE_SECONDS = 2 * 60 * 60  # 2 hours
 
 # InGameName -> Telegram username
@@ -351,3 +351,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
