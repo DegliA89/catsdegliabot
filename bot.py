@@ -1,3 +1,6 @@
+# ==============================
+# IMPORT
+# ==============================
 from telegram import Update
 from telegram.ext import (
     ApplicationBuilder,
@@ -6,27 +9,49 @@ from telegram.ext import (
     ContextTypes,
     filters
 )
+
+import os
 import re
 import time
 import asyncio
+import threading
+from http.server import BaseHTTPRequestHandler, HTTPServer
 
-import os
+
+# ==============================
+# CONFIG
+# ==============================
 TOKEN = os.getenv("BOT_TOKEN")
-RESTORE_SECONDS = 2 * 60 * 60  # 2 hours
-
-# InGameName -> Telegram username
-players = {}
-
-# InGameName -> last positions (for "-")
-last_positions = {}
-
-# Building -> list of entries {player, expires_at(optional)}
-buildings = {i: [] for i in range(8)}
+RESTORE_SECONDS = 2 * 60 * 60  # 2 ore
 
 
-# --------------------------------------------------
-# Utility
-# --------------------------------------------------
+# ==============================
+# STORAGE (in memoria)
+# ==============================
+players = {}          # InGameName -> @TelegramName
+last_positions = {}   # InGameName -> last positions
+buildings = {i: [] for i in range(8)}  # 0–7
+
+
+# ==============================
+# MINI HTTP SERVER (RENDER)
+# ==============================
+class HealthHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"OK")
+
+
+def start_http_server():
+    port = int(os.environ.get("PORT", 10000))
+    server = HTTPServer(("0.0.0.0", port), HealthHandler)
+    server.serve_forever()
+
+
+# ==============================
+# UTILITY
+# ==============================
 def format_time(seconds):
     if seconds < 0:
         seconds = 0
@@ -52,52 +77,36 @@ def get_player_from_telegram(username):
     return None
 
 
-# --------------------------------------------------
-# /help
-# --------------------------------------------------
+# ==============================
+# COMMANDS
+# ==============================
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "/register InGameName @TelegramName\n"
-        "Register a player.\n\n"
         "/remove InGameName\n"
-        "Remove a player.\n\n"
-        "/123 /1-3 /-45 (@TelegramName)\n"
-        "Assign buildings. '-' keeps previous value.\n\n"
+        "/123 /1-3 /-45\n"
         "/list\n"
-        "Show all buildings.\n\n"
         "/lX\n"
-        "Show building X (0–7).\n\n"
-        "/bX InGameName1, InGameName2\n"
-        "Add players to building X.\n\n"
+        "/bX InGame1, InGame2\n"
         "/reset\n"
-        "Reset all buildings.\n\n"
-        "/call [text]\n"
-        "Mention all registered players in the group.\n\n"
+        "/call text\n"
         "/xall text\n"
-        "Send a private message to all players.\n\n"
-        "/h x:xx x:xx x:xx | - | res | reset\n"
-        "Manage timers for building 0."
+        "/h x:xx x:xx | res | reset"
     )
 
 
-# --------------------------------------------------
-# /register
-# --------------------------------------------------
 async def register(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if len(context.args) != 2:
-        await update.message.reply_text("Usage: /register InGameName @TelegramName")
+        await update.message.reply_text("Uso: /register InGameName @TelegramName")
         return
 
     ingame, telegram = context.args
     players[ingame] = telegram
     last_positions[ingame] = []
 
-    await update.message.reply_text(f"Player {ingame} registered.")
+    await update.message.reply_text(f"{ingame} registrato.")
 
 
-# --------------------------------------------------
-# /remove
-# --------------------------------------------------
 async def remove(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if len(context.args) != 1:
         return
@@ -109,41 +118,27 @@ async def remove(update: Update, context: ContextTypes.DEFAULT_TYPE):
     for b in buildings.values():
         b[:] = [e for e in b if e["player"] != ingame]
 
-    await update.message.reply_text(f"Player {ingame} removed.")
+    await update.message.reply_text(f"{ingame} rimosso.")
 
 
-# --------------------------------------------------
-# /reset
-# --------------------------------------------------
 async def reset(update: Update, context: ContextTypes.DEFAULT_TYPE):
     for i in range(8):
         buildings[i].clear()
-
-    await update.message.reply_text(
-        "All buildings have been reset.\n"
-        "Registered players were not removed.\n\n"
-        "list restored"
-    )
+    await update.message.reply_text("Buildings resettati.")
 
 
-# --------------------------------------------------
-# /abc with "-" support
-# --------------------------------------------------
 async def number_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip()
-    match = re.match(r"^/([0-7\-]{3,})(?:\s+(@\w+))?$", text)
+    match = re.match(r"^/([0-7\-]{3,})$", text)
     if not match:
         return
 
     seq = match.group(1)
-    target = match.group(2)
+    sender = update.message.from_user.username
+    if not sender:
+        return
 
-    if target:
-        ingame = get_player_from_telegram(target)
-    else:
-        sender = update.message.from_user.username
-        ingame = get_player_from_telegram(f"@{sender}") if sender else None
-
+    ingame = get_player_from_telegram(f"@{sender}")
     if not ingame:
         return
 
@@ -160,20 +155,15 @@ async def number_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     for pos in resolved:
         entry = {"player": ingame}
-
         if pos == 0:
             expires = time.time() + RESTORE_SECONDS
             entry["expires_at"] = expires
             context.application.create_task(
                 schedule_restore(context.application, players[ingame], expires)
             )
-
         buildings[pos].append(entry)
 
 
-# --------------------------------------------------
-# /list
-# --------------------------------------------------
 async def list_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     now = time.time()
     msg = []
@@ -188,7 +178,6 @@ async def list_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         for p, entries in grouped.items():
             tg = players[p].replace("@", "")
             line = f"{len(entries)}x {p} ({tg})"
-
             if i == 0:
                 times = [
                     format_time(int(e["expires_at"] - now))
@@ -196,22 +185,14 @@ async def list_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 ]
                 if times:
                     line += " " + " ".join(times)
-
             msg.append(line)
         msg.append("")
 
     await update.message.reply_text("\n".join(msg))
 
 
-# --------------------------------------------------
-# /lX
-# --------------------------------------------------
 async def lx(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = update.message.text.strip()
-    if not re.match(r"^/l[0-7]$", text):
-        return
-
-    x = int(text[2])
+    x = int(update.message.text[2])
     now = time.time()
     msg = [f"----- {x} -----"]
 
@@ -222,7 +203,6 @@ async def lx(update: Update, context: ContextTypes.DEFAULT_TYPE):
     for p, entries in grouped.items():
         tg = players[p].replace("@", "")
         line = f"{len(entries)}x {p} ({tg})"
-
         if x == 0:
             times = [
                 format_time(int(e["expires_at"] - now))
@@ -230,18 +210,13 @@ async def lx(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ]
             if times:
                 line += " " + " ".join(times)
-
         msg.append(line)
 
     await update.message.reply_text("\n".join(msg))
 
 
-# --------------------------------------------------
-# /bX
-# --------------------------------------------------
 async def bx(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = update.message.text.strip()
-    match = re.match(r"^/b([0-7])\s+(.+)$", text)
+    match = re.match(r"^/b([0-7])\s+(.+)$", update.message.text)
     if not match:
         return
 
@@ -262,24 +237,12 @@ async def bx(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 buildings[x].append(entry)
 
 
-# --------------------------------------------------
-# /call
-# --------------------------------------------------
 async def call(update: Update, context: ContextTypes.DEFAULT_TYPE):
     mentions = ", ".join(players.values())
-    sender = update.message.from_user.username or "Unknown"
     text = " ".join(context.args)
-
-    msg = mentions
-    if text:
-        msg += f"\n\n{sender}:\n{text}"
-
-    await update.message.reply_text(msg)
+    await update.message.reply_text(f"{mentions}\n\n{text}")
 
 
-# --------------------------------------------------
-# /xall
-# --------------------------------------------------
 async def xall(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
         return
@@ -294,9 +257,6 @@ async def xall(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
 
-# --------------------------------------------------
-# /h timers
-# --------------------------------------------------
 async def h_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     sender = update.message.from_user.username
     if not sender:
@@ -318,7 +278,6 @@ async def h_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     for i, arg in enumerate(context.args):
         if i >= len(timers):
             break
-
         if arg == "-":
             continue
         if arg == "res":
@@ -328,10 +287,14 @@ async def h_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             timers[i]["expires_at"] = time.time() + h * 3600 + m * 60
 
 
-# --------------------------------------------------
+# ==============================
 # MAIN
-# --------------------------------------------------
+# ==============================
 def main():
+    # HTTP server (Render)
+    threading.Thread(target=start_http_server, daemon=True).start()
+
+    # Telegram bot
     app = ApplicationBuilder().token(TOKEN).build()
 
     app.add_handler(CommandHandler("help", help_command))
@@ -352,29 +315,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-
-# questa parte è per un mini web server HTTP nel bot
-# Non cambia nulla per Telegram, serve solo per aprire una porta HTTP render
-import threading
-from http.server import BaseHTTPRequestHandler, HTTPServer
-import os
-
-class HealthHandler(BaseHTTPRequestHandler):
-    def do_GET(self):
-        self.send_response(200)
-        self.end_headers()
-        self.wfile.write(b"OK")
-
-def start_http_server():
-    port = int(os.environ.get("PORT", 10000))
-    server = HTTPServer(("0.0.0.0", port), HealthHandler)
-    server.serve_forever()
-
-def main():
-    # avvio web server in thread separato
-    threading.Thread(target=start_http_server, daemon=True).start()
-
-    # AVVIO BOT TELEGRAM (il tuo codice attuale)
-    app = ApplicationBuilder().token(TOKEN).build()
-    app.run_polling()
