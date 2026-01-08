@@ -354,3 +354,27 @@ if __name__ == "__main__":
     main()
 
 
+# questa parte è per un mini web server HTTP nel bot
+# Non cambia nulla per Telegram, serve solo per aprire una porta HTTP render
+import threading
+from http.server import BaseHTTPRequestHandler, HTTPServer
+import os
+
+class HealthHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"OK")
+
+def start_http_server():
+    port = int(os.environ.get("PORT", 10000))
+    server = HTTPServer(("0.0.0.0", port), HealthHandler)
+    server.serve_forever()
+
+def main():
+    # avvio web server in thread separato
+    threading.Thread(target=start_http_server, daemon=True).start()
+
+    # AVVIO BOT TELEGRAM (il tuo codice attuale)
+    app = ApplicationBuilder().token(TOKEN).build()
+    app.run_polling()
